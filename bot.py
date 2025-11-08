@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -42,16 +42,19 @@ active_sessions = set()  # Keeps track of logged-in user IDs
 # States for ConversationHandlers
 LOGIN_USERNAME, LOGIN_PASSWORD = range(2)
 REG_USERNAME, REG_PASSWORD = range(2, 4)
+ADD_TITLE, ADD_TEXT = range(100, 102)
+
+# In-memory storage for demonstration (replace with file storage per user)
+user_sections = {}  # {user_id: [{id, title, text, created_at, updated_at}]}
 
 
-# Utility functions for safe JSON read/write
+# Utility functions
 def atomic_read_json(file_path: Path):
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logger.error(f"Failed to read JSON {file_path}: {e}")
-        # rename corrupted file for backup and safety
         corrupt_path = file_path.with_suffix(".corrupt.bak")
         os.rename(file_path, corrupt_path)
         return None
@@ -90,6 +93,24 @@ def owner_only(func):
 
 
 # Command handlers
+
+async def send_logged_in_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [InlineKeyboardButton("➕ Add Section", callback_data="add_section")],
+        [InlineKeyboardButton("📂 Show Sections", callback_data="show_sections")],
+        [InlineKeyboardButton("🔍 Search Sections", callback_data="search_sections")],
+        [InlineKeyboardButton("🗑️ Trash", callback_data="trash")],
+        [InlineKeyboardButton("⭐ Favorites", callback_data="favorites")],
+        [InlineKeyboardButton("📤 Export Sections", callback_data="export_sections")],
+        [InlineKeyboardButton("📊 Stats", callback_data="stats")],
+        [InlineKeyboardButton("🚪 Logout", callback_data="logout")],
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+    if update.message:
+        await update.message.reply_text("Choose an option:", reply_markup=keyboard)
+    elif update.callback_query:
+        await update.callback_query.edit_message_text("Choose an option:", reply_markup=keyboard)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -146,7 +167,6 @@ async def register_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.user_data.get("register_username")
     users = atomic_read_json(USERS_FILE) or {}
 
-    # Hash password securely before storing
     hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
     users[username] = {
@@ -168,6 +188,11 @@ async def register_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # User authentication commands placeholders for login
 
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in active_sessions:
+        await update.message.reply_text("⚠️ You are already logged in.")
+        await send_logged_in_menu(update, context)
+        return ConversationHandler.END
     await update.message.reply_text("Please enter your username:")
     return LOGIN_USERNAME
 
@@ -198,6 +223,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bcrypt.checkpw(password.encode('utf-8'), hashed):
         active_sessions.add(update.effective_user.id)
         await update.message.reply_text(f"✅ Logged in as {username}")
+        await send_logged_in_menu(update, context)
     else:
         await update.message.reply_text("❌ Incorrect password.")
 
@@ -210,7 +236,7 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_sessions.remove(user_id)
         await update.message.reply_text("✅ Successfully logged out.")
     else:
-        await update.message.reply_text("You are not logged in.")
+        await update.message.reply_text("❌ You are not logged in.")
 
 
 # Admin command placeholder
@@ -225,7 +251,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Admin Panel:", reply_markup=reply_markup)
 
 
-# Callback query handler for admin inline buttons example
+# Callback query handler for admin inline buttons and main menu
+
 @owner_only
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -238,7 +265,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(f"Registered Users:\n{user_list}")
 
     elif data == "admin_backup":
-        # Placeholder for backup logic
         await query.edit_message_text("Backup initiated (not implemented).")
 
     elif data == "admin_force_logout":
@@ -248,12 +274,73 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Unknown admin command.")
 
 
-# Main function
+async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    await query.answer()
+    data = query.data
 
+    if user_id not in active_sessions:
+        await query.edit_message_text("⚠️ You must be logged in to use the menu.")
+        return
+
+    if data == "add_section":
+        await query.edit_message_text("Send me the *title* of your new section:", parse_mode=ParseMode.MARKDOWN)
+        return ADD_TITLE
+
+    elif data == "show_sections":
+        sections = user_sections.get(user_id, [])
+        if not sections:
+            await query.edit_message_text("You have no saved sections.")
+            return
+        msg = "📝 Your Sections:\n\n"
+        for sec in sections:
+            msg += f"• *{sec['title']}*\n\n{sec['text']}\n\n"
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+    elif data == "logout":
+        if user_id in active_sessions:
+            active_sessions.remove(user_id)
+            await query.edit_message_text("✅ Successfully logged out.")
+        else:
+            await query.edit_message_text("❌ You are not logged in.")
+
+    else:
+        await query.edit_message_text("Feature coming soon or unknown command.")
+
+
+async def add_section_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_section_title"] = update.message.text.strip()
+    await update.message.reply_text("Now send the *content* of the section:", parse_mode=ParseMode.MARKDOWN)
+    return ADD_TEXT
+
+
+async def add_section_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    title = context.user_data.get("new_section_title")
+    text = update.message.text.strip()
+
+    sections = user_sections.setdefault(user_id, [])
+    section_id = len(sections) + 1
+    now = datetime.utcnow().isoformat()
+
+    sections.append({
+        "id": section_id,
+        "title": title,
+        "text": text,
+        "created_at": now,
+        "updated_at": now,
+    })
+
+    await update.message.reply_text(f"✅ Section *{title}* added!", parse_mode=ParseMode.MARKDOWN)
+    await send_logged_in_menu(update, context)
+    return ConversationHandler.END
+
+
+# Main function
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Conversation handler for login process
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("login", login_start)],
         states={
@@ -263,7 +350,6 @@ def main():
         fallbacks=[],
     )
 
-    # Conversation handler for registration process
     register_conv = ConversationHandler(
         entry_points=[CommandHandler("register", register_start)],
         states={
@@ -273,15 +359,24 @@ def main():
         fallbacks=[CommandHandler("cancel", register_cancel)],
     )
 
+    add_section_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(menu_callback_handler, pattern='^add_section$')],
+        states={
+            ADD_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_section_title)],
+            ADD_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_section_text)],
+        },
+        fallbacks=[],
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(login_conv)
     application.add_handler(register_conv)
+    application.add_handler(add_section_conv)
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CallbackQueryHandler(admin_callback_handler))
-
-    # Add more command handlers here (add, show, edit, delete, trash, etc.)
+    application.add_handler(CallbackQueryHandler(menu_callback_handler))
 
     print("Bot started...")
     application.run_polling()
