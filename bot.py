@@ -6,7 +6,9 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ParseMode
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram.constants import ParseMode
+
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
