@@ -2,18 +2,19 @@ import os
 import json
 import logging
 import bcrypt
+import time
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
-from telegram.constants import ParseMode as ParseModeConstant
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
-    CallbackQueryHandler,
     CommandHandler,
-    ConversationHandler,
     ContextTypes,
+    CallbackQueryHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -23,6 +24,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "6065778458"))
 
+# Logging setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -39,11 +41,13 @@ if not USERS_FILE.exists():
 active_sessions = set()
 user_sections = {}
 
+start_time = time.time()
+
 # Conversation states
 LOGIN_USERNAME, LOGIN_PASSWORD = range(2)
 REG_USERNAME, REG_PASSWORD = range(2, 4)
 ADD_TITLE, ADD_CONTENT = range(100, 102)
-SHOW_SECTION, EDIT_CHOICE, EDIT_TITLE, EDIT_CONTENT, DELETE_CONFIRM = range(102, 107)
+EDIT_TITLE, EDIT_CONTENT, DELETE_CONFIRM = range(102, 105)
 
 # Utility functions
 def atomic_read_json(path):
@@ -51,7 +55,7 @@ def atomic_read_json(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"Failed to read {path}: {e}")
+        logger.error(f"Error reading {path}: {e}")
         corrupt_path = path.with_suffix(".corrupt.bak")
         os.rename(path, corrupt_path)
         return None
@@ -66,7 +70,7 @@ def atomic_write_json(path, data):
 def requires_login(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in active_sessions:
-            await update.message.reply_text("⚠️ Please log in first (/login or /register).")
+            await update.message.reply_text("⚠️ Please /login or /register first.")
             return
         return await func(update, context)
     return wrapper
@@ -79,69 +83,44 @@ def owner_only(func):
         return await func(update, context)
     return wrapper
 
-# --- MENU FUNCTIONS ---
-
-async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    buttons = [
-        [
-            InlineKeyboardButton("➕ Add Section", callback_data="add_section"),
-            InlineKeyboardButton("📂 Show Sections", callback_data="show_sections"),
-        ],
-        [
-            InlineKeyboardButton("🔍 Search Sections", callback_data="search_sections"),
-            InlineKeyboardButton("🗑️ Trash", callback_data="trash"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Favorites", callback_data="favorites"),
-            InlineKeyboardButton("📤 Export", callback_data="export"),
-        ],
-        [
-            InlineKeyboardButton("📊 Stats", callback_data="stats"),
-            InlineKeyboardButton("🚪 Logout", callback_data="logout"),
-        ],
-    ]
-    keyboard = InlineKeyboardMarkup(buttons)
-    if update.message:
-        await update.message.reply_text("Select an option:", reply_markup=keyboard)
-    else:
-        await update.callback_query.edit_message_text("Select an option:", reply_markup=keyboard)
-
-# --- COMMAND HANDLERS ---
+# Commands
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Hello {update.effective_user.first_name}! Welcome to Knowledge Manager.\n"
-        "Use /login or /register to get started."
-    )
+    await update.message.reply_text("👋 Welcome! Use /login or /register to get started.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = """
-Commands:
-/start - Welcome message
-/help - This help
-/login - Login to your account
-/logout - Logout your session
-/register - Create account
-/add - Add new section (login required)
-/show - Show your sections (login required)
-/admin - Admin panel (owner only)
-"""
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        "📚 Commands:\n"
+        "/start - Start bot\n"
+        "/help - Help message\n"
+        "/login - Login\n"
+        "/logout - Logout\n"
+        "/register - Register\n"
+        "/ping - Bot uptime\n"
+        "/add - Add section\n"
+        "/show - Show sections\n"
+        "/admin - Admin panel (owner only)"
+    )
 
-# --- REGISTER CONVERSATION ---
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uptime = int(time.time() - start_time)
+    h, rem = divmod(uptime, 3600)
+    m, s = divmod(rem, 60)
+    await update.message.reply_text(f"🏓 Pong! Uptime: {h}h {m}m {s}s")
 
+# Registration
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Enter username:")
+    await update.message.reply_text("📝 Enter username:")
     return REG_USERNAME
 
 async def register_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.text.strip()
     users = atomic_read_json(USERS_FILE) or {}
     if username in users:
-        await update.message.reply_text("Username exists, pick another:")
+        await update.message.reply_text("❌ Username exists, try another:")
         return REG_USERNAME
     context.user_data["register_username"] = username
-    await update.message.reply_text("Enter password:")
+    await update.message.reply_text("🔑 Enter password:")
     return REG_PASSWORD
 
 async def register_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,64 +130,113 @@ async def register_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     users[username] = {"password": hashed, "created_at": datetime.utcnow().isoformat()}
     atomic_write_json(USERS_FILE, users)
-    await update.message.reply_text(f"Registered {username}! Use /login to sign in.")
+    await update.message.reply_text(f"✅ Registered *{username}*. Use /login.", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
 async def register_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registration cancelled.")
     return ConversationHandler.END
 
-# --- LOGIN CONVERSATION ---
-
+# Login
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id in active_sessions:
-        await update.message.reply_text("You are already logged in.")
+        await update.message.reply_text("⚠️ Already logged in.")
         await send_main_menu(update, context)
         return ConversationHandler.END
-    await update.message.reply_text("Enter username:")
+    await update.message.reply_text("👤 Enter username:")
     return LOGIN_USERNAME
 
 async def login_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["login_username"] = update.message.text.strip()
-    await update.message.reply_text("Enter password:")
+    await update.message.reply_text("🔐 Enter password:")
     return LOGIN_PASSWORD
 
 async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.user_data.get("login_username")
     password = update.message.text.strip()
     users = atomic_read_json(USERS_FILE) or {}
-
     user = users.get(username)
     if not user:
-        await update.message.reply_text("User not found, please register.")
+        await update.message.reply_text("❌ User not found. Please /register.")
         return ConversationHandler.END
 
     if bcrypt.checkpw(password.encode(), user["password"].encode()):
         active_sessions.add(update.effective_user.id)
-        await update.message.reply_text(f"Logged in as {username}.")
+        await update.message.reply_text(f"✅ Logged in as {username}.")
         await send_main_menu(update, context)
     else:
-        await update.message.reply_text("Incorrect password.")
+        await update.message.reply_text("❌ Incorrect password.")
     return ConversationHandler.END
 
 async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in active_sessions:
         active_sessions.remove(user_id)
-        await update.message.reply_text("Logged out.")
+        await update.message.reply_text("✅ Logged out successfully.")
     else:
-        await update.message.reply_text("You are not logged in.")
+        await update.message.reply_text("❌ You are not logged in.")
 
-# --- ADD SECTION CONVERSATION ---
+# Main menu buttons (3 per row)
+async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [
+            InlineKeyboardButton("➕ Add", callback_data="add_section"),
+            InlineKeyboardButton("📂 Show", callback_data="show_sections"),
+            InlineKeyboardButton("🔍 Search", callback_data="search_sections")
+        ],
+        [
+            InlineKeyboardButton("🗑️ Trash", callback_data="trash"),
+            InlineKeyboardButton("⭐ Favorites", callback_data="favorites"),
+            InlineKeyboardButton("📤 Export", callback_data="export_sections")
+        ],
+        [
+            InlineKeyboardButton("📊 Stats", callback_data="stats"),
+            InlineKeyboardButton("🚪 Logout", callback_data="logout"),
+            InlineKeyboardButton("ℹ️ Help", callback_data="help")
+        ]
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+    if update.message:
+        await update.message.reply_text("Select an option:", reply_markup=keyboard)
+    else:
+        await update.callback_query.edit_message_text("Select an option:", reply_markup=keyboard)
 
+# Menu callback handler
 @requires_login
-async def add_section_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send the *title* of the section:", parse_mode=ParseModeConstant.MARKDOWN)
-    return ADD_TITLE
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    user_id = update.effective_user.id
+    await query.answer()
 
+    if data == "add_section":
+        await query.edit_message_text("📝 Send section title:")
+        return ADD_TITLE
+
+    elif data == "show_sections":
+        await show_sections(update, context)
+        return
+
+    elif data == "logout":
+        if user_id in active_sessions:
+            active_sessions.remove(user_id)
+            await query.edit_message_text("✅ Logged out.")
+        else:
+            await query.edit_message_text("❌ You are not logged in.")
+        return
+
+    elif data == "help":
+        await query.edit_message_text("Use /help for list of commands.")
+        return
+
+    else:
+        await query.edit_message_text("❌ Unknown option.")
+
+# Add section conversation
+@requires_login
 async def add_section_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["section_title"] = update.message.text.strip()
-    await update.message.reply_text("Send the *content* of the section or upload a PDF:", parse_mode=ParseModeConstant.MARKDOWN)
+    await update.message.reply_text("Send section content or upload a PDF:")
     return ADD_CONTENT
 
 async def add_section_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,166 +257,144 @@ async def add_section_content(update: Update, context: ContextTypes.DEFAULT_TYPE
         "text": content,
         "created_at": datetime.utcnow().isoformat()
     })
-
-    await update.message.reply_text(f"Added section *{title}*.", parse_mode=ParseModeConstant.MARKDOWN)
+    await update.message.reply_text(f"✅ Added section *{title}*", parse_mode=ParseMode.MARKDOWN)
     await send_main_menu(update, context)
     return ConversationHandler.END
 
-# --- SHOW SECTIONS AND SECTION ACTIONS ---
-
+# Show sections with Back button (3 buttons per row)
 @requires_login
 async def show_sections(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     user_id = update.effective_user.id
     sections = user_sections.get(user_id, [])
     if not sections:
-        await update.message.reply_text("No sections found.")
+        await query.edit_message_text("No sections saved yet.")
         return
 
-    buttons = [
-        [InlineKeyboardButton(sec["title"], callback_data=f"section_{sec['id']}")]
-        for sec in sections
-    ]
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
-    await update.message.reply_text("Your sections:", reply_markup=InlineKeyboardMarkup(buttons))
+    buttons = []
+    row = []
+    for sec in sections:
+        row.append(InlineKeyboardButton(sec["title"], callback_data=f"section_{sec['id']}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")])
+    await query.edit_message_text("Your sections:", reply_markup=InlineKeyboardMarkup(buttons))
 
+# Section detail, edit, delete, favorite placeholders
+@requires_login
 async def section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    data = query.data
     user_id = update.effective_user.id
     await query.answer()
-    data = query.data
 
     if data.startswith("section_"):
-        section_id = int(data.split("_")[1])
+        sec_id = int(data.split("_")[1])
         sections = user_sections.get(user_id, [])
-        section = next((s for s in sections if s["id"] == section_id), None)
+        section = next((s for s in sections if s["id"] == sec_id), None)
         if not section:
             await query.edit_message_text("Section not found.")
             return
 
-        text = f"*{section['title']}*\n\n{section['text']}"
         buttons = [
             [
-                InlineKeyboardButton("✏️ Edit", callback_data=f"edit_{section_id}"),
-                InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{section_id}")
+                InlineKeyboardButton("✏️ Edit", callback_data=f"edit_{sec_id}"),
+                InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{sec_id}"),
+                InlineKeyboardButton("⭐ Favorite", callback_data=f"fav_{sec_id}")
             ],
             [
-                InlineKeyboardButton("⭐ Favorite", callback_data=f"fav_{section_id}"),
-                InlineKeyboardButton("🔙 Back", callback_data="show_sections"),
+                InlineKeyboardButton("🔙 Back", callback_data="show_sections")
             ]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseModeConstant.MARKDOWN)
+        text = f"*{section['title']}*\n\n{section['text']}"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.MARKDOWN)
         return
 
-    if data == "show_sections":
-        await show_sections(update, context)
-        return
-
-    if data == "back":
+    if data == "show_sections" or data == "back_to_menu":
         await send_main_menu(update, context)
         return
 
-    # Placeholder for edit, delete, favorite commands
-    if data.startswith("edit_"):
-        await query.edit_message_text("Edit feature coming soon.")
-        return
+    # TODO: implement edit, delete, favorite action handlers here with conversation flow
 
-    if data.startswith("delete_"):
-        await query.edit_message_text("Delete feature coming soon.")
-        return
+    await query.edit_message_text("Feature coming soon.")
 
-    if data.startswith("fav_"):
-        await query.edit_message_text("Favorite feature coming soon.")
-        return
-
-    if data == "logout":
-        if user_id in active_sessions:
-            active_sessions.remove(user_id)
-            await query.edit_message_text("Logged out.")
-        else:
-            await query.edit_message_text("You are not logged in.")
-        return
-
-    await query.edit_message_text("Unknown command.")
-
-# --- ADMIN PANEL ---
-
+# Admin panel
 @owner_only
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
-        [InlineKeyboardButton("List Users", callback_data="admin_list_users")],
-        [InlineKeyboardButton("Backup Data", callback_data="admin_backup")]
+        [InlineKeyboardButton("👥 List Users", callback_data="admin_list_users")],
+        [InlineKeyboardButton("💾 Backup Data", callback_data="admin_backup")]
     ]
     await update.message.reply_text("Admin Panel:", reply_markup=InlineKeyboardMarkup(buttons))
 
 @owner_only
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+    await query.answer()
 
     if data == "admin_list_users":
         users = atomic_read_json(USERS_FILE) or {}
-        list_text = "\n".join(f"{u} (ID hidden)" for u in users.keys()) or "No users found."
-        await query.edit_message_text(f"Registered Users:\n{list_text}")
+        out = "\n".join(f"{u} (ID hidden)" for u in users.keys()) or "No users."
+        await query.edit_message_text(f"Registered Users:\n{out}")
         return
 
     if data == "admin_backup":
-        await query.edit_message_text("Backup not implemented yet.")
+        await query.edit_message_text("Backup not implemented.")
         return
 
     await query.edit_message_text("Unknown admin command.")
 
-# --- MAIN FUNCTION ---
-
+# Main app setup
 def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-
+    # Conversations
     register_conv = ConversationHandler(
         entry_points=[CommandHandler("register", register_start)],
         states={
             REG_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_username)],
             REG_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_password)],
         },
-        fallbacks=[CommandHandler("cancel", register_cancel)]
+        fallbacks=[CommandHandler("cancel", register_cancel)],
     )
-    application.add_handler(register_conv)
-
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("login", login_start)],
         states={
             LOGIN_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_username)],
             LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
         },
-        fallbacks=[]
+        fallbacks=[],
     )
-    application.add_handler(login_conv)
-
     add_section_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(menu_callback, pattern="^add_section$")],
         states={
             ADD_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_section_title)],
-            ADD_CONTENT: [
-                MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, add_section_content)
-            ],
+            ADD_CONTENT: [MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, add_section_content)],
         },
-        fallbacks=[]
+        fallbacks=[],
     )
-    application.add_handler(add_section_conv)
 
-    application.add_handler(CommandHandler("logout", logout))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("ping", ping))
 
-    # Callback query handlers
-    application.add_handler(CallbackQueryHandler(menu_callback))
-    application.add_handler(CallbackQueryHandler(section_callback, pattern="^section_"))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+    app.add_handler(register_conv)
+    app.add_handler(login_conv)
+    app.add_handler(add_section_conv)
 
-    application.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("logout", logout))
+    app.add_handler(CommandHandler("admin", admin_panel))
+
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+    app.add_handler(CallbackQueryHandler(menu_callback))
+    app.add_handler(CallbackQueryHandler(section_callback, pattern="^section_"))
 
     print("Bot started...")
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
