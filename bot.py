@@ -1,7 +1,9 @@
 import os
 import json
 import logging
+import bcrypt
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -37,8 +39,9 @@ if not USERS_FILE.exists():
 
 active_sessions = set()  # Keeps track of logged-in user IDs
 
-# States for ConversationHandler example (login)
+# States for ConversationHandlers
 LOGIN_USERNAME, LOGIN_PASSWORD = range(2)
+REG_USERNAME, REG_PASSWORD = range(2, 4)
 
 
 # Utility functions for safe JSON read/write
@@ -61,7 +64,7 @@ def atomic_write_json(file_path: Path, data: dict):
     os.replace(tmp_file, file_path)
 
 
-# Decorator to restrict commands to logged-in users
+# Decorators for access control
 def requires_login(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -75,7 +78,6 @@ def requires_login(func):
     return wrapper
 
 
-# Decorator to restrict commands to owner/admin only
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -119,7 +121,52 @@ Available commands:
     await update.message.reply_text(commands_text)
 
 
-# User authentication commands placeholders
+# Registration conversation handlers
+
+async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Please enter a username to register:")
+    return REG_USERNAME
+
+
+async def register_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = update.message.text.strip()
+    users = atomic_read_json(USERS_FILE) or {}
+
+    if username in users:
+        await update.message.reply_text("⚠️ Username already exists. Please try a different one:")
+        return REG_USERNAME
+
+    context.user_data["register_username"] = username
+    await update.message.reply_text("Please enter a password:")
+    return REG_PASSWORD
+
+
+async def register_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    password = update.message.text.strip()
+    username = context.user_data.get("register_username")
+    users = atomic_read_json(USERS_FILE) or {}
+
+    # Hash password securely before storing
+    hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    users[username] = {
+        "password": hashed,
+        "created_at": datetime.utcnow().isoformat(),
+        "settings": {}
+    }
+    atomic_write_json(USERS_FILE, users)
+
+    await update.message.reply_text(f"✅ Registration successful! You can now /login with username: {username}")
+    return ConversationHandler.END
+
+
+async def register_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Registration cancelled.")
+    return ConversationHandler.END
+
+
+# User authentication commands placeholders for login
+
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Please enter your username:")
     return LOGIN_USERNAME
@@ -147,8 +194,8 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Username not found. Please register first.")
         return ConversationHandler.END
 
-    # Password should be checked here (using bcrypt in real code)
-    if password == user_info.get("password"):  # Placeholder, replace with hashed check
+    hashed = user_info.get("password", "").encode('utf-8')
+    if bcrypt.checkpw(password.encode('utf-8'), hashed):
         active_sessions.add(update.effective_user.id)
         await update.message.reply_text(f"✅ Logged in as {username}")
     else:
@@ -216,9 +263,20 @@ def main():
         fallbacks=[],
     )
 
+    # Conversation handler for registration process
+    register_conv = ConversationHandler(
+        entry_points=[CommandHandler("register", register_start)],
+        states={
+            REG_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_username)],
+            REG_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_password)],
+        },
+        fallbacks=[CommandHandler("cancel", register_cancel)],
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(login_conv)
+    application.add_handler(register_conv)
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CallbackQueryHandler(admin_callback_handler))
